@@ -1,0 +1,300 @@
+\documentclass[12pt,a4paper]{ctexart}
+
+% 宏包引入
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{xcolor}
+
+% 页面设置
+\geometry{left=2.5cm,right=2.5cm,top=3cm,bottom=3cm}
+
+% 页眉页脚设置
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{指导老师：吴少智}
+\fancyhead[R]{撰写人：丁正阳}
+\fancyfoot[C]{\thepage}
+
+% 超链接设置
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,      
+    urlcolor=cyan,
+}
+
+% 图表标题设置
+\captionsetup{font=small,labelfont=bf}
+
+\begin{document}
+
+% 标题页
+\begin{center}
+    {\LARGE \textbf{第十六周学习周报}}\\[0.5cm]
+    {\large Out: Feb 7, 2026}\\
+    {\large Due: Feb 13, 2026}\\[0.5cm]
+    {\large 电子科技大学}\\
+    {\large 本科科研项目}\\
+    {\large 脑机与深度学习 \#16}
+\end{center}
+
+\vspace{1cm}
+
+\noindent \textbf{Note:} This article reflects the specific guidance and implementation ideas of policies and regulations over a certain period. Some content may be subject to timeliness issues, and certain conclusions drawn may lack concrete evidence, potentially leading to some logical inconsistencies. Therefore, this article is intended for internal discussion only.
+
+\section{本周学习内容一览}
+
+上周我们实现了ATCNet+DANN，虽然取得了约11\%的准确率提升，但也发现了DANN无条件域对齐的局限性。本周我深入研究了Conditional Domain Adversarial Network（CDAN）方法，并成功实现了ATCNet+CDAN。CDAN通过引入类别条件信息，理论上应该能够实现更精细的域对齐。然而，实验结果却出乎意料——CDAN相比DANN的提升非常有限。这促使我深入思考问题的根源，并为下一步的改进指明了方向。
+
+\section{为什么要改成CDAN？}
+
+\subsection{DANN的不足之处}
+
+回顾上周的实验，DANN虽然带来了性能提升，但存在一个根本性问题：\textbf{无条件的域对齐}。
+
+DANN的域判别器只接收特征向量作为输入，判断特征来自哪个域，而完全不考虑类别信息。这意味着什么呢？这意味着DANN会试图将所有特征（无论属于哪个类别）都对齐到一个统一的分布中。但在分类任务中，不同类别的特征本应该是分离的。这种无条件对齐可能会破坏类别间的判别性边界。
+
+举个例子：假设我们有"左手运动想象"和"右手运动想象"两个类别。在源域（训练受试者）中，这两个类别的特征是分离的。但DANN的无条件对齐可能会将目标域（测试受试者）的"左手"特征错误地对齐到源域的"右手"特征附近，导致分类错误。
+
+\subsection{CDAN的理论优势}
+
+CDAN（Conditional Domain Adversarial Network）正是为了解决这个问题而提出的。它的核心思想是：\textbf{在域对齐时考虑类别信息}。
+
+CDAN的优势在于：
+
+\begin{enumerate}
+    \item \textbf{类别条件化}：域判别器不仅接收特征，还接收类别预测信息，从而实现类别条件的域对齐
+    \item \textbf{保持判别性}：通过条件化，CDAN可以在对齐域分布的同时保持类别间的判别性
+    \item \textbf{更精细的对齐}：CDAN可以为每个类别分别进行域对齐，避免类别混淆
+\end{enumerate}
+
+\subsection{多线性条件的作用}
+
+CDAN的关键技术是多线性条件化（multilinear conditioning）。具体来说，CDAN将特征向量$f$和类别预测$p$通过外积（outer product）结合：
+
+\begin{equation}
+h = f \otimes p
+\end{equation}
+
+这个外积操作生成了一个高维的条件特征表示，包含了特征和类别的联合信息。域判别器基于这个条件特征$h$进行判别，从而实现了类别条件的域对齐。
+
+为什么要用外积而不是简单的拼接呢？外积能够捕捉特征和类别之间的交互信息，使得域判别器能够学习到"对于特定类别，特征应该如何对齐"这样的细粒度知识。
+
+\section{如何实现CDAN？}
+
+\subsection{架构改进}
+
+ATCNet+CDAN的架构如图\ref{fig:atcnet_cdan_arch}所示（概念图）。
+
+\begin{figure}[H]
+\centering
+\begin{verbatim}
+输入EEG信号
+    ↓
+ATCNet特征提取器
+    ↓
+特征向量 f
+    ↓         ↓
+标签分类器   类别预测 p
+    ↓         ↓
+类别预测    f ⊗ p (多线性条件化)
+              ↓
+         域判别器（带GRL）
+              ↓
+            域预测
+\end{verbatim}
+\caption{ATCNet+CDAN架构示意图}
+\label{fig:atcnet_cdan_arch}
+\end{figure}
+
+\subsection{条件域判别器设计}
+
+与DANN相比，CDAN的域判别器接收的输入维度更高。假设特征维度为$d_f$，类别数为$C$，则条件特征的维度为$d_f \times C$。
+
+条件域判别器的结构：
+
+\begin{verbatim}
+Input: h = f ⊗ p (维度: d_f × C)
+    ↓
+Linear(d_f × C, 1024) → ReLU → Dropout(0.5)
+    ↓
+Linear(1024, 512) → ReLU → Dropout(0.5)
+    ↓
+Linear(512, num_domains)
+\end{verbatim}
+
+为了处理高维输入，我增加了隐藏层的维度，并使用了更深的网络结构。
+
+\subsection{与DANN的区别}
+
+CDAN与DANN的主要区别总结如下：
+
+\begin{table}[H]
+\centering
+\caption{DANN与CDAN的对比}
+\label{tab:dann_vs_cdan}
+\begin{tabular}{lll}
+\toprule
+\textbf{方面} & \textbf{DANN} & \textbf{CDAN} \\
+\midrule
+域判别器输入 & 特征$f$ & 条件特征$f \otimes p$ \\
+对齐方式 & 无条件全局对齐 & 类别条件对齐 \\
+类别信息 & 不考虑 & 显式考虑 \\
+参数量 & 较少 & 较多（高维输入） \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{CDAN的实验结果}
+
+\subsection{实验设置}
+
+为了公平对比，实验设置与DANN保持一致：
+\begin{itemize}
+    \item 数据集：BCI Competition IV 2a
+    \item 训练策略：LOSO交叉验证
+    \item 随机种子：seed 0-4（多seed验证）
+    \item 超参数：与DANN相同
+\end{itemize}
+
+\subsection{性能对比}
+
+表\ref{tab:method_comparison}展示了ATCNet、DANN和CDAN的性能对比。
+
+\begin{table}[H]
+\centering
+\caption{不同方法的性能对比}
+\label{tab:method_comparison}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{方法} & \textbf{准确率 (\%)} & \textbf{Kappa} & \textbf{训练时间 (min)} & \textbf{参数量} \\
+\midrule
+ATCNet & 57.68 $\pm$ 15.66 & 0.436 $\pm$ 0.209 & 66.93 & 113,732 \\
+ATCNet+DANN & 68.67 $\pm$ 11.84 & 0.582 $\pm$ 0.158 & 95.46 & 187,701 \\
+ATCNet+CDAN & 68.79 $\pm$ 11.34 & 0.584 $\pm$ 0.151 & 73.00 & 212,277 \\
+\midrule
+CDAN vs DANN & \textbf{+0.12\%} & \textbf{+0.002} & \textbf{-22.46} & +24,576 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{CDAN的混淆矩阵分析}
+
+图\ref{fig:cdan_confmat}展示了CDAN在seed 0上的平均混淆矩阵。与ATCNet相比，CDAN在各类别上的分类性能都有所提升，对角线元素更加突出。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.7\textwidth]{../results/ATCNet_CDAN_bcic2a_loso_cdan_seed-0_aug-True_GPU0_20260201_2129/confmats/avg_confusion_matrix.png}
+\caption{CDAN在seed 0上的平均混淆矩阵（9个受试者平均）}
+\label{fig:cdan_confmat}
+\end{figure}
+
+\subsection{受试者级别的详细分析}
+
+表\ref{tab:subject_wise_cdan}展示了CDAN在各受试者上的表现。
+
+\begin{table}[H]
+\centering
+\caption{CDAN在各受试者上的表现对比}
+\label{tab:subject_wise_cdan}
+\begin{tabular}{ccccc}
+\toprule
+\textbf{受试者} & \textbf{ATCNet} & \textbf{DANN} & \textbf{CDAN} & \textbf{CDAN vs DANN} \\
+\midrule
+Subject 1 & 71.18\% & 72.57\% & 72.22\% & -0.35\% \\
+Subject 2 & 43.06\% & 47.92\% & 51.74\% & +3.82\% \\
+Subject 3 & 77.08\% & 88.19\% & 89.24\% & +1.05\% \\
+Subject 4 & 55.21\% & 67.36\% & 68.75\% & +1.39\% \\
+Subject 5 & 26.74\% & 72.92\% & 63.89\% & -9.03\% \\
+Subject 6 & 44.44\% & 52.43\% & 54.51\% & +2.08\% \\
+Subject 7 & 69.79\% & 76.74\% & 79.51\% & +2.77\% \\
+Subject 8 & 68.75\% & 76.39\% & 76.39\% & 0.00\% \\
+Subject 9 & 62.85\% & 63.54\% & 62.85\% & -0.69\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{为什么还要继续改进？}
+
+\subsection{CDAN的提升有限}
+
+从实验结果可以看出，CDAN相比DANN的提升非常有限（仅+0.12\%）。这个结果让我感到意外，因为理论上CDAN应该比DANN更优。为什么会这样呢？
+
+仔细分析受试者级别的结果，我发现了一些有趣的现象：
+
+\begin{enumerate}
+    \item \textbf{有升有降}：CDAN在某些受试者上表现更好（如Subject 2, 7），但在另一些受试者上反而更差（如Subject 5, 9）
+    
+    \item \textbf{Subject 5的性能下降}：CDAN在Subject 5上的准确率从72.92\%降到了63.89\%，下降了9.03\%。这是一个显著的退化。
+    
+    \item \textbf{训练时间反而减少}：虽然CDAN的参数量更多，但训练时间反而比DANN少了22分钟。这可能是因为CDAN的收敛速度更快。
+\end{enumerate}
+
+\subsection{Subject 5的性能对比}
+
+特别值得关注的是Subject 5的表现变化。图\ref{fig:cdan_subject5_comparison}展示了ATCNet、DANN和CDAN在Subject 5上的训练曲线对比。
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\includegraphics[width=\textwidth]{../results/ATCNet_CDAN_bcic2a_loso_cdan_seed-0_aug-True_GPU0_20260201_2129/curves/subject_5_acc.png}
+\caption{CDAN在Subject 5上的准确率曲线}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\textwidth}
+\includegraphics[width=\textwidth]{../results/ATCNet_CDAN_bcic2a_loso_cdan_seed-0_aug-True_GPU0_20260201_2129/curves/subject_5_loss.png}
+\caption{CDAN在Subject 5上的损失曲线}
+\end{subfigure}
+\caption{CDAN在Subject 5上的训练曲线。虽然相比ATCNet有显著提升（从26.74\%到63.89\%），但相比DANN反而下降了9.03\%。}
+\label{fig:cdan_subject5_comparison}
+\end{figure}
+
+从图\ref{fig:cdan_subject5_comparison}可以看出，CDAN在Subject 5上的验证准确率约为64\%，虽然远高于ATCNet的27\%，但低于DANN的73\%。这个现象很有趣：为什么理论上更优的CDAN反而在某些受试者上表现更差呢？
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.7\textwidth]{../results/ATCNet_CDAN_bcic2a_loso_cdan_seed-0_aug-True_GPU0_20260201_2129/confmats/confmat_subject_5.png}
+\caption{CDAN在Subject 5上的混淆矩阵。相比ATCNet有明显改善，但仍存在一定的类别混淆。}
+\label{fig:cdan_subject5_confmat}
+\end{figure}
+
+\subsection{存在的问题分析}
+
+CDAN提升有限的原因可能有以下几点：
+
+\begin{enumerate}
+    \item \textbf{多线性条件化的维度灾难}：外积操作使得条件特征的维度大幅增加（$d_f \times C$），这可能导致过拟合，特别是在数据量有限的BCI任务中。
+    
+    \item \textbf{类别预测的不确定性}：CDAN依赖于类别预测$p$，但在训练初期，类别预测可能不准确。错误的类别信息可能会误导域对齐。
+    
+    \item \textbf{对齐策略仍然过于简单}：虽然CDAN引入了类别条件，但它仍然是基于对抗训练的全局对齐策略。这种策略可能不适合BCI数据的特点。
+    
+    \item \textbf{忽略了特征的局部结构}：CDAN和DANN都是在特征空间进行全局对齐，没有考虑特征的局部结构和几何关系。
+\end{enumerate}
+
+\subsection{引出FA-CDAN的思路}
+
+基于以上分析，我开始思考：能否在CDAN的基础上引入特征对齐（Feature Alignment）机制？
+
+特征对齐的思路是：不仅要对齐域分布，还要显式地对齐特征的统计特性（如均值、协方差）。这种对齐可以在特征空间的几何层面上减少域偏移，可能比单纯的对抗训练更有效。
+
+下周我将尝试实现FA-CDAN（Feature Alignment CDAN），结合对抗训练和特征对齐两种策略，期待能够取得更好的效果。
+
+\section{小结}
+
+本周成功实现了ATCNet+CDAN，在BCI2a数据集上取得了与DANN相当的性能。CDAN通过引入类别条件，在理论上应该比DANN更优，但实验结果显示提升有限（仅0.12\%）。
+
+这个结果引发了我的思考：对抗训练虽然能让域判别器无法区分域，但这种对齐是隐式的、间接的。域判别器被"欺骗"了，但特征分布真的对齐了吗？还是只是变得更加混乱？如果我们采用更直接的方式——显式地最小化源域和目标域特征分布之间的距离，会不会效果更好？
+
+特征对齐（Feature Alignment）的思路似乎很自然：直接计算并最小化特征的统计距离。但问题是，如何对齐才不会破坏类别结构？无条件的全局对齐会不会把不同类别的特征错误地拉到一起？这些疑问，需要在下周的实验中寻找答案。
+
+\end{document}
